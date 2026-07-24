@@ -1,0 +1,20 @@
+{
+  "province": "Girona",
+  "offices": [
+    { "id": "4", "name": "CNP LLORET DE MAR" },
+    { "id": "2", "name": "OFICINA EXPEDICION TIE, Cristóbal Grober" },
+    { "id": "1", "name": "OFICINA DE EXTRANJEROS, Jaume I" }
+  ],
+  "tramite_id": "4010",
+  "doc_type": "NIE",
+  "doc_value": "Y1234567Z",
+  "name": "NOMBRE Y APELLIDOS",
+  "phone": "600000000",
+  "email": "correo@ejemplo.com",
+  "use_smart_scheduling": true,
+  "off_peak_interval_seconds": 900,
+  "peak_interval_seconds": 90,
+  "pause_hours_on_block": 1.0,
+  "ntfy_topic": "mi_canal_citas_girona_secr3t",
+  "anticaptcha_api_key": ""
+}

@@ -8,3 +8,7 @@ chrome_profiles/
 
 .DS_Store
 chromedriver
+.env
+config.json
+*.log
+
