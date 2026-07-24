@@ -1,5 +1,7 @@
 {
   "province": "Girona",
+  "use_any_office": true,
+  "only_notify_preferred_offices": true,
   "offices": [
     { "id": "4", "name": "CNP LLORET DE MAR" },
     { "id": "2", "name": "OFICINA EXPEDICION TIE, Cristóbal Grober" },
@@ -9,6 +11,7 @@
   "doc_type": "NIE",
   "doc_value": "Y1234567Z",
   "name": "NOMBRE Y APELLIDOS",
+  "country": "MARRUECOS",
   "phone": "600000000",
   "email": "correo@ejemplo.com",
   "use_smart_scheduling": true,

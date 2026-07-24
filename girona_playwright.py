@@ -4,7 +4,7 @@ import os
 import sys
 import time
 from datetime import datetime, timedelta
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional, Tuple, List
 
 try:
     from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
@@ -54,16 +54,14 @@ def send_ntfy_alert(topic: str, title: str, message: str, priority: str = "high"
 
 def get_smart_check_interval(config: Dict[str, Any]) -> Tuple[int, str]:
     """
-    Calcula el intervalo dinámico en segundos según la hora y día actual:
-    - Horas punta (Lunes a Viernes 07:45 - 09:30, y Jueves 14:30 - 16:00): Búsqueda rápida (ej: 90s).
-    - Horas normales: Búsqueda cada 10-15 minutos (ej: 900s).
+    Calcula el intervalo dinámico en segundos según la hora y día actual.
     """
     if not config.get("use_smart_scheduling", True):
         normal = config.get("check_interval_seconds", 900)
         return normal, "Modo Fijo"
 
     now = datetime.now()
-    weekday = now.weekday() # 0 = Lunes, 3 = Jueves, 6 = Domingo
+    weekday = now.weekday()
     hour = now.hour
     minute = now.minute
 
@@ -81,10 +79,10 @@ def get_smart_check_interval(config: Dict[str, Any]) -> Tuple[int, str]:
 
     if is_peak:
         interval = config.get("peak_interval_seconds", 90)
-        return interval, "🔥 HORA PUNTA (Búsqueda Rápida)"
+        return interval, "🔥 HORA PUNTA (Búsqueda Rápida cada 90s)"
     else:
         interval = config.get("off_peak_interval_seconds", 900)
-        return interval, "💤 Hora Normal (Búsqueda cada 10-15m)"
+        return interval, "💤 Hora Normal (Búsqueda cada 15m)"
 
 def solve_recaptcha_anticaptcha(api_key: str, page_url: str, site_key: str) -> Optional[str]:
     """Resuelve reCAPTCHA v2 usando la API de Anti-Captcha.com."""
@@ -180,8 +178,8 @@ def load_config(config_path: str = "config.json") -> Dict[str, Any]:
 
 def check_cita_girona(config: Dict[str, Any], headless: bool = True) -> Tuple[bool, bool]:
     """
-    Realiza un intento de comprobación de citas en Girona.
-    Retorna: (cita_encontrada: bool, requiere_pausa_bloqueo: bool)
+    Realiza una comprobación de citas en Girona.
+    Usa 'Cualquier oficina' (99) y filtra para notificar SOLAMENTE si la cita está en una de tus oficinas preferidas.
     """
     url = "https://icp.administracionelectronica.gob.es/icpplus/index.html"
     ntfy_topic = config.get("ntfy_topic", "")
@@ -228,99 +226,169 @@ def check_cita_girona(config: Dict[str, Any], headless: bool = True) -> Tuple[bo
             page.click("#btnAceptar")
 
             # Paso 2: Seleccionar Oficina y Trámite
-            offices = config.get("offices", [{"id": "4", "name": "CNP LLORET DE MAR"}])
+            use_any_office = config.get("use_any_office", True)
             tramite_id = config.get("tramite_id", "4010")
 
-            for office in offices:
-                office_id = office.get("id")
-                office_name = office.get("name")
-                logging.info(f"3. Probando oficina: {office_name} (ID: {office_id})...")
-
+            if use_any_office:
+                logging.info("3. Seleccionando 'Cualquier oficina' (opción 99) para escanear la provincia...")
                 if page.is_visible("#sede"):
-                    page.select_option("#sede", value=office_id)
+                    page.select_option("#sede", value="99")
+                    time.sleep(1)
+            else:
+                offices = config.get("offices", [{"id": "4", "name": "CNP LLORET DE MAR"}])
+                if offices and page.is_visible("#sede"):
+                    page.select_option("#sede", value=offices[0].get("id", "4"))
                     time.sleep(1)
 
-                tramite_selected = False
-                for select_name in ["tramiteGrupo[0]", "tramiteGrupo[1]", "tramiteCuerpo[0]", "tramite[0]"]:
-                    if page.is_visible(f"select[name='{select_name}']"):
-                        try:
-                            page.select_option(f"select[name='{select_name}']", value=tramite_id)
-                            tramite_selected = True
-                            logging.info(f"   Trámite {tramite_id} seleccionado.")
-                            break
-                        except Exception:
-                            continue
-                
-                if not tramite_selected and page.is_visible("#tramite"):
-                    page.select_option("#tramite", value=tramite_id)
+            # Seleccionar Trámite de Policía Nacional (Toma de Huellas 4010)
+            tramite_selected = False
+            for select_name in ["tramiteGrupo[1]", "tramiteGrupo[0]", "tramiteCuerpo[0]", "tramite[0]"]:
+                if page.is_visible(f"select[name='{select_name}']"):
+                    try:
+                        page.select_option(f"select[name='{select_name}']", value=tramite_id)
+                        tramite_selected = True
+                        logging.info(f"   Trámite {tramite_id} seleccionado.")
+                        break
+                    except Exception:
+                        continue
+            
+            if not tramite_selected and page.is_visible("#tramite"):
+                page.select_option("#tramite", value=tramite_id)
 
-                page.click("#btnAceptar")
+            page.click("#btnAceptar")
 
-                if page.is_visible("#btnEntrar"):
-                    page.click("#btnEntrar")
+            # Paso 3: Pantalla de Información / Instrucciones
+            if page.is_visible("#btnEntrar"):
+                page.click("#btnEntrar")
 
-                # Paso 4: Rellenar Formulario de Datos Personales
-                logging.info("4. Rellenando formulario de datos...")
-                
-                doc_type = config.get("doc_type", "NIE").upper()
-                if doc_type == "NIE" and page.is_visible("#rbtNie"):
-                    page.check("#rbtNie")
-                elif doc_type == "PASAPORTE" and page.is_visible("#rbtPasaporte"):
-                    page.check("#rbtPasaporte")
-                elif page.is_visible("#rbtNif"):
-                    page.check("#rbtNif")
+            # Paso 4: Rellenar Formulario de Datos Personales
+            logging.info("4. Rellenando formulario de datos (NIE, Nombre y País)...")
+            
+            doc_type = config.get("doc_type", "NIE").upper()
+            if doc_type == "NIE" and page.is_visible("#rbtNie"):
+                page.check("#rbtNie")
+            elif doc_type == "PASAPORTE" and page.is_visible("#rbtPasaporte"):
+                page.check("#rbtPasaporte")
+            elif page.is_visible("#rbtNif"):
+                page.check("#rbtNif")
 
-                page.fill("#txtIdCitador", config.get("doc_value", ""))
-                page.fill("#txtDesCitador", config.get("name", ""))
+            page.fill("#txtIdCitador", config.get("doc_value", ""))
+            page.fill("#txtDesCitador", config.get("name", ""))
 
+            # País de Nacionalidad (#txtPaisNac) - Ejemplo: MARRUECOS / 348
+            country = config.get("country", "MARRUECOS")
+            if page.is_visible("#txtPaisNac"):
+                try:
+                    page.select_option("#txtPaisNac", label=country.upper())
+                    logging.info(f"   País seleccionado: {country.upper()}")
+                except Exception:
+                    try:
+                        page.select_option("#txtPaisNac", value="348")
+                    except Exception as e_c:
+                        logging.warning(f"   No se pudo seleccionar país '{country}': {e_c}")
+
+            handle_captcha_if_present(page, config)
+
+            page.click("#btnEnviar")
+
+            # Paso 5: Consultar Cita
+            if page.is_visible("#btnEnviar"):
                 handle_captcha_if_present(page, config)
-
                 page.click("#btnEnviar")
 
-                # Paso 5: Consultar Disponibilidad Cita
-                if page.is_visible("#btnEnviar"):
-                    handle_captcha_if_present(page, config)
-                    page.click("#btnEnviar")
+            page_text = page.content().lower()
 
-                page_text = page.content().lower()
+            if any(bk in page_text for bk in block_keywords):
+                logging.warning("⚠️ Detectada respuesta de bloqueo o sobrecarga.")
+                browser.close()
+                return False, True
+
+            no_available_keywords = [
+                "en este momento no hay citas disponibles",
+                "no hay citas disponibles",
+                "sin citas disponibles",
+                "el servicio se encuentra sobrecargado"
+            ]
+
+            has_no_appointments = any(kw in page_text for kw in no_available_keywords)
+
+            # Lista de IDs u oficinas preferidas del usuario (ej: ["4", "2", "1"])
+            preferred_offices = config.get("offices", [])
+            preferred_ids = [str(o.get("id")) for o in preferred_offices if "id" in o]
+
+            # Si aparece el selector #idSede en la página de resultados
+            if page.is_visible("#idSede"):
+                options = page.eval_on_selector_all("#idSede option", """
+                    opts => opts.map(o => ({ value: o.value, text: o.innerText.trim() }))
+                """)
                 
-                if any(bk in page_text for bk in block_keywords):
-                    logging.warning(f"⚠️ Detectada respuesta de bloqueo en {office_name}.")
-                    browser.close()
-                    return False, True
+                available_offices = [o for o in options if o['value'] and o['value'] != ""]
 
-                no_available_keywords = [
-                    "en este momento no hay citas disponibles",
-                    "no hay citas disponibles",
-                    "sin citas disponibles",
-                    "el servicio se encuentra sobrecargado"
-                ]
+                if available_offices:
+                    # Comprobar cuáles de las disponibles coinciden con las preferidas
+                    matching_offices = []
+                    if preferred_ids:
+                        for o in available_offices:
+                            if str(o['value']) in preferred_ids:
+                                matching_offices.append(o)
+                    else:
+                        matching_offices = available_offices
 
-                has_no_appointments = any(kw in page_text for kw in no_available_keywords)
+                    only_preferred = config.get("only_notify_preferred_offices", True)
 
-                if not has_no_appointments:
-                    msg = (
-                        f"🚨 ¡¡¡ CITA PREVIA DISPONIBLE EN GIRONA !!! 🚨\n\n"
-                        f"Oficina: {office_name}\n"
-                        f"Trámite: Toma de Huellas ({tramite_id})\n"
-                        f"Entra de inmediato a la Sede Electrónica."
-                    )
-                    logging.info(msg)
-                    send_ntfy_alert(
-                        topic=ntfy_topic,
-                        title="🚨 Cita Previa Disponible en Girona!",
-                        message=msg,
-                        priority="urgent"
-                    )
+                    if matching_offices:
+                        offices_str = "\n".join([f"• {o['text']}" for o in matching_offices])
+                        msg = (
+                            f"🚨 ¡¡¡ CITA DISPONIBLE EN TU OFICINA PREFERIDA !!! 🚨\n\n"
+                            f"Oficinas deseadas con hueco libre:\n{offices_str}\n\n"
+                            f"Trámite: Toma de Huellas ({tramite_id})\n"
+                            f"¡Entra de inmediato a la Sede Electrónica!"
+                        )
+                        logging.info(msg)
+                        send_ntfy_alert(
+                            topic=ntfy_topic,
+                            title="🚨 Cita Disponible en Tu Oficina!",
+                            message=msg,
+                            priority="urgent"
+                        )
+                        page.screenshot(path="cita_disponible_girona.png")
+                        browser.close()
+                        return True, False
                     
-                    page.screenshot(path="cita_disponible_girona.png")
-                    browser.close()
-                    return True, False
-                else:
-                    logging.info(f"   Sin citas disponibles en {office_name}.")
-                
-                page.goto("https://icp.administracionelectronica.gob.es/icpplus/citar?locale=es")
-                time.sleep(2)
+                    elif not only_preferred:
+                        # Notificar aunque no sea de las preferidas si la opción está activa
+                        offices_str = "\n".join([f"• {o['text']}" for o in available_offices])
+                        msg = (
+                            f"ℹ️ Cita disponible en otras oficinas de Girona:\n{offices_str}"
+                        )
+                        logging.info(msg)
+                        send_ntfy_alert(
+                            topic=ntfy_topic,
+                            title="ℹ️ Cita Disponible (Otra Oficina)",
+                            message=msg,
+                            priority="default"
+                        )
+                    else:
+                        logging.info("   Hay citas en la provincia, pero NINGUNA coincide con tus oficinas preferidas (Lloret / Grober / Jaume I). Ignorando alerta.")
+
+            elif not has_no_appointments:
+                msg = (
+                    f"🚨 ¡¡¡ CITA PREVIA DISPONIBLE EN GIRONA !!! 🚨\n\n"
+                    f"Trámite: Toma de Huellas ({tramite_id})\n"
+                    f"¡Entra inmediatamente a la Sede Electrónica!"
+                )
+                logging.info(msg)
+                send_ntfy_alert(
+                    topic=ntfy_topic,
+                    title="🚨 Cita Previa Disponible en Girona!",
+                    message=msg,
+                    priority="urgent"
+                )
+                page.screenshot(path="cita_disponible_girona.png")
+                browser.close()
+                return True, False
+            else:
+                logging.info("   Sin citas disponibles en ninguna oficina de la provincia en este momento.")
 
         except PlaywrightTimeoutError:
             logging.warning("Timeout durante la navegación. Puede que el servidor de la Sede esté lento.")
@@ -337,9 +405,9 @@ def main():
     ntfy_topic = config.get("ntfy_topic", "")
     headless_mode = "--no-headless" not in sys.argv
 
-    logging.info("=== Monitor de Cita Previa Girona (Playwright + ntfy.sh) ===")
+    logging.info("=== Monitor de Cita Previa Girona (Scan + Filtro Oficinas Preferidas) ===")
     if ntfy_topic:
-        logging.info(f"Notificaciones ntfy.sh activas en el canal: https://ntfy.sh/{ntfy_topic}")
+        logging.info(f"Notificaciones ntfy.sh activas en: https://ntfy.sh/{ntfy_topic}")
 
     attempt = 1
     consecutive_errors = 0
@@ -351,7 +419,7 @@ def main():
         found, is_blocked = check_cita_girona(config, headless=headless_mode)
         
         if found:
-            logging.info("¡Cita encontrada! Deteniendo bucle para que procedas a confirmar.")
+            logging.info("¡Cita encontrada en oficina preferida! Deteniendo bucle para que procedas a confirmar.")
             break
 
         if is_blocked:
