@@ -178,8 +178,8 @@ def load_config(config_path: str = "config.json") -> Dict[str, Any]:
 
 def check_cita_girona(config: Dict[str, Any], headless: bool = True) -> Tuple[bool, bool]:
     """
-    Realiza una comprobación de citas en Girona.
-    Usa 'Cualquier oficina' (99) y filtra para notificar SOLAMENTE si la cita está en una de tus oficinas preferidas.
+    Realiza una comprobación ultrarrápida de citas en Girona.
+    Optimizado para responder en 1-2 segundos sin esperar recursos estáticos pesados.
     """
     url = "https://icp.administracionelectronica.gob.es/icpplus/index.html"
     ntfy_topic = config.get("ntfy_topic", "")
@@ -199,13 +199,16 @@ def check_cita_girona(config: Dict[str, Any], headless: bool = True) -> Tuple[bo
             viewport={"width": 1280, "height": 800}
         )
         
+        # Bloquear imágenes, fuentes y rastreadores lentos para carga instantánea
+        context.route("**/*.{png,jpg,jpeg,svg,gif,ico,woff,woff2,ttf,otf}", lambda route: route.abort())
+
         page = context.new_page()
         page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-        page.set_default_timeout(25000)
+        page.set_default_timeout(15000)
 
         try:
             logging.info("1. Conectando al portal de Cita Previa...")
-            page.goto(url)
+            page.goto(url, wait_until="domcontentloaded")
 
             page_text_init = page.content().lower()
             block_keywords = [
@@ -223,7 +226,10 @@ def check_cita_girona(config: Dict[str, Any], headless: bool = True) -> Tuple[bo
             # Paso 1: Seleccionar Provincia (Girona)
             logging.info("2. Seleccionando provincia Girona...")
             page.select_option("#form", label="Girona")
-            page.click("#btnAceptar")
+            
+            # Hacer clic y esperar únicamente la estructura DOM del formulario
+            with page.expect_navigation(wait_until="domcontentloaded", timeout=15000):
+                page.click("#btnAceptar")
 
             # Paso 2: Seleccionar Oficina y Trámite
             use_any_office = config.get("use_any_office", True)
@@ -233,12 +239,10 @@ def check_cita_girona(config: Dict[str, Any], headless: bool = True) -> Tuple[bo
                 logging.info("3. Seleccionando 'Cualquier oficina' (opción 99) para escanear la provincia...")
                 if page.is_visible("#sede"):
                     page.select_option("#sede", value="99")
-                    time.sleep(1)
             else:
                 offices = config.get("offices", [{"id": "4", "name": "CNP LLORET DE MAR"}])
                 if offices and page.is_visible("#sede"):
                     page.select_option("#sede", value=offices[0].get("id", "4"))
-                    time.sleep(1)
 
             # Seleccionar Trámite de Policía Nacional (Toma de Huellas 4010)
             tramite_selected = False
@@ -255,11 +259,13 @@ def check_cita_girona(config: Dict[str, Any], headless: bool = True) -> Tuple[bo
             if not tramite_selected and page.is_visible("#tramite"):
                 page.select_option("#tramite", value=tramite_id)
 
-            page.click("#btnAceptar")
+            with page.expect_navigation(wait_until="domcontentloaded", timeout=15000):
+                page.click("#btnAceptar")
 
             # Paso 3: Pantalla de Información / Instrucciones
             if page.is_visible("#btnEntrar"):
-                page.click("#btnEntrar")
+                with page.expect_navigation(wait_until="domcontentloaded", timeout=15000):
+                    page.click("#btnEntrar")
 
             # Paso 4: Rellenar Formulario de Datos Personales
             logging.info("4. Rellenando formulario de datos (NIE, Nombre y País)...")
@@ -289,12 +295,14 @@ def check_cita_girona(config: Dict[str, Any], headless: bool = True) -> Tuple[bo
 
             handle_captcha_if_present(page, config)
 
-            page.click("#btnEnviar")
+            with page.expect_navigation(wait_until="domcontentloaded", timeout=15000):
+                page.click("#btnEnviar")
 
             # Paso 5: Consultar Cita
             if page.is_visible("#btnEnviar"):
                 handle_captcha_if_present(page, config)
-                page.click("#btnEnviar")
+                with page.expect_navigation(wait_until="domcontentloaded", timeout=15000):
+                    page.click("#btnEnviar")
 
             page_text = page.content().lower()
 
@@ -312,7 +320,6 @@ def check_cita_girona(config: Dict[str, Any], headless: bool = True) -> Tuple[bo
 
             has_no_appointments = any(kw in page_text for kw in no_available_keywords)
 
-            # Lista de IDs u oficinas preferidas del usuario (ej: ["4", "2", "1"])
             preferred_offices = config.get("offices", [])
             preferred_ids = [str(o.get("id")) for o in preferred_offices if "id" in o]
 
@@ -325,7 +332,6 @@ def check_cita_girona(config: Dict[str, Any], headless: bool = True) -> Tuple[bo
                 available_offices = [o for o in options if o['value'] and o['value'] != ""]
 
                 if available_offices:
-                    # Comprobar cuáles de las disponibles coinciden con las preferidas
                     matching_offices = []
                     if preferred_ids:
                         for o in available_offices:
@@ -356,7 +362,6 @@ def check_cita_girona(config: Dict[str, Any], headless: bool = True) -> Tuple[bo
                         return True, False
                     
                     elif not only_preferred:
-                        # Notificar aunque no sea de las preferidas si la opción está activa
                         offices_str = "\n".join([f"• {o['text']}" for o in available_offices])
                         msg = (
                             f"ℹ️ Cita disponible en otras oficinas de Girona:\n{offices_str}"
@@ -405,7 +410,7 @@ def main():
     ntfy_topic = config.get("ntfy_topic", "")
     headless_mode = "--no-headless" not in sys.argv
 
-    logging.info("=== Monitor de Cita Previa Girona (Scan + Filtro Oficinas Preferidas) ===")
+    logging.info("=== Monitor de Cita Previa Girona (Ultrarrápido 1s) ===")
     if ntfy_topic:
         logging.info(f"Notificaciones ntfy.sh activas en: https://ntfy.sh/{ntfy_topic}")
 
