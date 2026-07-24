@@ -172,7 +172,7 @@ def load_config(config_path: str = "config.json") -> Dict[str, Any]:
 
 def check_cita_girona(config: Dict[str, Any], headless: bool = True) -> Tuple[bool, bool]:
     """
-    Realiza una comprobación de citas con selectores súper robustos y diagnóstico en pantalla.
+    Realiza una comprobación de citas con navegación directa y auto-detección de elementos en la portada.
     """
     url = "https://icp.administracionelectronica.gob.es/icpplus/index.html"
     ntfy_topic = config.get("ntfy_topic", "")
@@ -199,7 +199,7 @@ def check_cita_girona(config: Dict[str, Any], headless: bool = True) -> Tuple[bo
 
         try:
             t0 = time.time()
-            logging.info("PASO 1: Abriendo portada Cita Previa (https://icp.administracionelectronica.gob.es/icpplus/index.html)...")
+            logging.info("PASO 1: Abriendo la portada de la Sede Electrónica (https://icp.administracionelectronica.gob.es/icpplus/index.html)...")
             page.goto(url, wait_until="load", timeout=TIMEOUT)
             logging.info(f"   [OK] Portada cargada en {time.time() - t0:.2f}s. URL actual: {page.url}")
 
@@ -216,28 +216,42 @@ def check_cita_girona(config: Dict[str, Any], headless: bool = True) -> Tuple[bo
                 browser.close()
                 return False, True
 
+            # Inspeccionar elementos select en la página
+            selects = page.eval_on_selector_all("select", """
+                els => els.map(e => ({ id: e.id, name: e.name, optionsCount: e.options.length }))
+            """)
+            logging.info(f"   [Diagnóstico] Selectores encontrados en la portada: {selects}")
+
             # Paso 2: Seleccionar Provincia (Girona)
             t1 = time.time()
-            logging.info("PASO 2: Buscando el desplegable de provincias...")
+            logging.info("PASO 2: Seleccionando provincia Girona...")
             
-            # Selector robusto para el selector de provincia (#form, select[name='form'], #provincia)
-            prov_selector = page.wait_for_selector("#form, select[name='form'], #provincia, select", timeout=30000)
-            if not prov_selector:
-                raise Exception("No se encontró el selector de provincia en la página de inicio.")
-
-            logging.info("   Seleccionando 'Girona' en el desplegable...")
-            try:
-                page.select_option("#form", label="Girona")
-            except Exception:
-                try:
-                    page.select_option("select[name='form']", label="Girona")
-                except Exception:
+            # Buscar el select de provincia entre los disponibles
+            selected_prov = False
+            for sel in ["#form", "select[name='form']", "#provincia", "select"]:
+                if page.is_visible(sel):
+                    try:
+                        page.select_option(sel, label="Girona")
+                        selected_prov = True
+                        logging.info(f"   [OK] Provincia 'Girona' seleccionada usando '{sel}'.")
+                        break
+                    except Exception as e_sel:
+                        logging.warning(f"   Intento en '{sel}' falló: {e_sel}")
+            
+            if not selected_prov:
+                # Si hay algún botón de 'Acceder' o 'Entrar' antes de la selección
+                if page.is_visible("#btnEntrar") or page.is_visible("#btnEnviar"):
+                    logging.info("   Pulsando botón inicial en portada para acceder a la selección de provincia...")
+                    btn_init = "#btnEntrar" if page.is_visible("#btnEntrar") else "#btnEnviar"
+                    page.click(btn_init)
+                    page.wait_for_selector("select", timeout=15000)
                     page.select_option("select", label="Girona")
+                    selected_prov = True
 
-            logging.info("   Pulsando 'Aceptar' (#btnAceptar) para cargar las oficinas de Girona...")
+            logging.info("   Pulsando 'Aceptar' (#btnAceptar) para enviar selección de Girona...")
             page.click("#btnAceptar")
             
-            # Esperar a que la segunda pantalla cargue el selector #sede o trámite
+            # Esperar a que la segunda pantalla cargue el selector #sede o trámites
             page.wait_for_selector("#sede, select[name='tramiteGrupo[1]'], select[name='tramiteGrupo[0]']", timeout=TIMEOUT)
             logging.info(f"   [OK] Pantalla de Girona cargada en {time.time() - t1:.2f}s. URL actual: {page.url}")
 
@@ -441,7 +455,7 @@ def main():
     ntfy_topic = config.get("ntfy_topic", "")
     headless_mode = "--no-headless" not in sys.argv
 
-    logging.info("=== Monitor de Cita Previa Girona (Versión Robusta) ===")
+    logging.info("=== Monitor de Cita Previa Girona (Autodetector Portada) ===")
     if ntfy_topic:
         logging.info(f"Notificaciones ntfy.sh activas en: https://ntfy.sh/{ntfy_topic}")
 
