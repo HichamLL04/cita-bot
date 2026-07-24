@@ -172,11 +172,11 @@ def load_config(config_path: str = "config.json") -> Dict[str, Any]:
 
 def check_cita_girona(config: Dict[str, Any], headless: bool = True) -> Tuple[bool, bool]:
     """
-    Realiza una comprobación de citas con logging paso a paso y diagnóstico visual en errores.
+    Realiza una comprobación de citas con selectores súper robustos y diagnóstico en pantalla.
     """
     url = "https://icp.administracionelectronica.gob.es/icpplus/index.html"
     ntfy_topic = config.get("ntfy_topic", "")
-    TIMEOUT_3M = 180000
+    TIMEOUT = 60000
 
     with sync_playwright() as p:
         browser = p.chromium.launch(
@@ -195,13 +195,13 @@ def check_cita_girona(config: Dict[str, Any], headless: bool = True) -> Tuple[bo
 
         page = context.new_page()
         page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-        page.set_default_timeout(TIMEOUT_3M)
+        page.set_default_timeout(TIMEOUT)
 
         try:
             t0 = time.time()
-            logging.info("PASO 1: Abriendo portada https://icp.administracionelectronica.gob.es/icpplus/index.html...")
-            page.goto(url, wait_until="domcontentloaded", timeout=TIMEOUT_3M)
-            logging.info(f"   [OK] Portada cargada en {time.time() - t0:.2f}s. URL: {page.url}")
+            logging.info("PASO 1: Abriendo portada Cita Previa (https://icp.administracionelectronica.gob.es/icpplus/index.html)...")
+            page.goto(url, wait_until="load", timeout=TIMEOUT)
+            logging.info(f"   [OK] Portada cargada en {time.time() - t0:.2f}s. URL actual: {page.url}")
 
             page_text_init = page.content().lower()
             block_keywords = [
@@ -218,13 +218,28 @@ def check_cita_girona(config: Dict[str, Any], headless: bool = True) -> Tuple[bo
 
             # Paso 2: Seleccionar Provincia (Girona)
             t1 = time.time()
-            logging.info("PASO 2: Seleccionando opción 'Girona' en desplegable #form...")
-            page.select_option("#form", label="Girona")
-            logging.info("   Pulsando botón 'Aceptar' (#btnAceptar) y esperando respuesta del servidor...")
+            logging.info("PASO 2: Buscando el desplegable de provincias...")
             
+            # Selector robusto para el selector de provincia (#form, select[name='form'], #provincia)
+            prov_selector = page.wait_for_selector("#form, select[name='form'], #provincia, select", timeout=30000)
+            if not prov_selector:
+                raise Exception("No se encontró el selector de provincia en la página de inicio.")
+
+            logging.info("   Seleccionando 'Girona' en el desplegable...")
+            try:
+                page.select_option("#form", label="Girona")
+            except Exception:
+                try:
+                    page.select_option("select[name='form']", label="Girona")
+                except Exception:
+                    page.select_option("select", label="Girona")
+
+            logging.info("   Pulsando 'Aceptar' (#btnAceptar) para cargar las oficinas de Girona...")
             page.click("#btnAceptar")
-            page.wait_for_selector("#sede, select[name='tramiteGrupo[1]']", timeout=TIMEOUT_3M)
-            logging.info(f"   [OK] Pantalla de selección de trámites/oficinas cargada en {time.time() - t1:.2f}s. URL: {page.url}")
+            
+            # Esperar a que la segunda pantalla cargue el selector #sede o trámite
+            page.wait_for_selector("#sede, select[name='tramiteGrupo[1]'], select[name='tramiteGrupo[0]']", timeout=TIMEOUT)
+            logging.info(f"   [OK] Pantalla de Girona cargada en {time.time() - t1:.2f}s. URL actual: {page.url}")
 
             # Paso 3: Seleccionar Oficina y Trámite
             use_any_office = config.get("use_any_office", True)
@@ -237,7 +252,7 @@ def check_cita_girona(config: Dict[str, Any], headless: bool = True) -> Tuple[bo
             else:
                 offices = config.get("offices", [{"id": "4", "name": "CNP LLORET DE MAR"}])
                 if offices and page.is_visible("#sede"):
-                    logging.info(f"PASO 3: Seleccionando oficina específica ID {offices[0].get('id')}...")
+                    logging.info(f"PASO 3: Seleccionando oficina ID {offices[0].get('id')}...")
                     page.select_option("#sede", value=offices[0].get("id", "4"))
 
             tramite_selected = False
@@ -255,20 +270,20 @@ def check_cita_girona(config: Dict[str, Any], headless: bool = True) -> Tuple[bo
                 page.select_option("#tramite", value=tramite_id)
                 logging.info(f"   [OK] Trámite {tramite_id} seleccionado en #tramite.")
 
-            logging.info("   Pulsando 'Aceptar' (#btnAceptar) tras elegir trámite...")
+            logging.info("   Pulsando 'Aceptar' (#btnAceptar)...")
             t2 = time.time()
             page.click("#btnAceptar")
             time.sleep(1)
 
             # Paso 4: Pantalla de Información / Instrucciones (#btnEntrar)
             if page.is_visible("#btnEntrar"):
-                logging.info("PASO 4: Pantalla informativa detectada. Pulsando botón 'Entrar' (#btnEntrar)...")
+                logging.info("PASO 4: Pantalla de instrucciones detectada. Pulsando 'Entrar' (#btnEntrar)...")
                 page.click("#btnEntrar")
-                page.wait_for_selector("#txtIdCitador", timeout=TIMEOUT_3M)
+                page.wait_for_selector("#txtIdCitador", timeout=TIMEOUT)
                 logging.info(f"   [OK] Formulario de datos personales cargado en {time.time() - t2:.2f}s. URL: {page.url}")
 
             # Paso 5: Rellenar Formulario de Datos Personales
-            logging.info("PASO 5: Rellenando NIE, Nombre y País en el formulario...")
+            logging.info("PASO 5: Rellenando NIE, Nombre y País...")
             
             doc_type = config.get("doc_type", "NIE").upper()
             if doc_type == "NIE" and page.is_visible("#rbtNie"):
@@ -289,13 +304,13 @@ def check_cita_girona(config: Dict[str, Any], headless: bool = True) -> Tuple[bo
                 except Exception:
                     try:
                         page.select_option("#txtPaisNac", value="348")
-                        logging.info("   [OK] País seleccionado por código (348).")
+                        logging.info("   [OK] País seleccionado por código 348.")
                     except Exception as e_c:
                         logging.warning(f"   No se pudo seleccionar país '{country}': {e_c}")
 
             handle_captcha_if_present(page, config)
 
-            logging.info("   Pulsando 'Enviar' (#btnEnviar) en formulario de datos...")
+            logging.info("   Pulsando 'Enviar' (#btnEnviar)...")
             t3 = time.time()
             page.click("#btnEnviar")
             time.sleep(1)
@@ -405,7 +420,7 @@ def check_cita_girona(config: Dict[str, Any], headless: bool = True) -> Tuple[bo
                 page.screenshot(path="error_timeout.png")
                 with open("error_timeout.html", "w", encoding="utf-8") as fh:
                     fh.write(page.content())
-                logging.info("   [Diagnóstico] Captura de pantalla guardada en 'error_timeout.png' y HTML en 'error_timeout.html'.")
+                logging.info("   [Diagnóstico] Captura guardada en 'error_timeout.png' y HTML en 'error_timeout.html'.")
             except Exception:
                 pass
         except Exception as ex:
@@ -426,7 +441,7 @@ def main():
     ntfy_topic = config.get("ntfy_topic", "")
     headless_mode = "--no-headless" not in sys.argv
 
-    logging.info("=== Monitor de Cita Previa Girona (Logging Detallado Paso a Paso) ===")
+    logging.info("=== Monitor de Cita Previa Girona (Versión Robusta) ===")
     if ntfy_topic:
         logging.info(f"Notificaciones ntfy.sh activas en: https://ntfy.sh/{ntfy_topic}")
 
