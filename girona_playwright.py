@@ -178,8 +178,7 @@ def load_config(config_path: str = "config.json") -> Dict[str, Any]:
 
 def check_cita_girona(config: Dict[str, Any], headless: bool = True) -> Tuple[bool, bool]:
     """
-    Realiza una comprobación ultrarrápida de citas en Girona.
-    Optimizado para responder en 1-2 segundos sin esperar recursos estáticos pesados.
+    Realiza una comprobación de citas en Girona con un timeout de 3 minutos (180,000ms).
     """
     url = "https://icp.administracionelectronica.gob.es/icpplus/index.html"
     ntfy_topic = config.get("ntfy_topic", "")
@@ -198,17 +197,17 @@ def check_cita_girona(config: Dict[str, Any], headless: bool = True) -> Tuple[bo
             user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
             viewport={"width": 1280, "height": 800}
         )
-        
-        # Bloquear imágenes, fuentes y rastreadores lentos para carga instantánea
-        context.route("**/*.{png,jpg,jpeg,svg,gif,ico,woff,woff2,ttf,otf}", lambda route: route.abort())
 
         page = context.new_page()
         page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-        page.set_default_timeout(15000)
+        
+        # Timeout de 3 minutos (180.000 ms) para tolerar cualquier lentitud del servidor
+        TIMEOUT_3M = 180000
+        page.set_default_timeout(TIMEOUT_3M)
 
         try:
             logging.info("1. Conectando al portal de Cita Previa...")
-            page.goto(url, wait_until="domcontentloaded")
+            page.goto(url, wait_until="domcontentloaded", timeout=TIMEOUT_3M)
 
             page_text_init = page.content().lower()
             block_keywords = [
@@ -227,9 +226,9 @@ def check_cita_girona(config: Dict[str, Any], headless: bool = True) -> Tuple[bo
             logging.info("2. Seleccionando provincia Girona...")
             page.select_option("#form", label="Girona")
             
-            # Hacer clic y esperar únicamente la estructura DOM del formulario
-            with page.expect_navigation(wait_until="domcontentloaded", timeout=15000):
-                page.click("#btnAceptar")
+            # Clic en Aceptar y esperar a que el selector #sede aparezca (Timeout 3m)
+            page.click("#btnAceptar")
+            page.wait_for_selector("#sede, select[name='tramiteGrupo[1]']", timeout=TIMEOUT_3M)
 
             # Paso 2: Seleccionar Oficina y Trámite
             use_any_office = config.get("use_any_office", True)
@@ -259,13 +258,13 @@ def check_cita_girona(config: Dict[str, Any], headless: bool = True) -> Tuple[bo
             if not tramite_selected and page.is_visible("#tramite"):
                 page.select_option("#tramite", value=tramite_id)
 
-            with page.expect_navigation(wait_until="domcontentloaded", timeout=15000):
-                page.click("#btnAceptar")
+            page.click("#btnAceptar")
+            time.sleep(1)
 
             # Paso 3: Pantalla de Información / Instrucciones
             if page.is_visible("#btnEntrar"):
-                with page.expect_navigation(wait_until="domcontentloaded", timeout=15000):
-                    page.click("#btnEntrar")
+                page.click("#btnEntrar")
+                page.wait_for_selector("#txtIdCitador", timeout=TIMEOUT_3M)
 
             # Paso 4: Rellenar Formulario de Datos Personales
             logging.info("4. Rellenando formulario de datos (NIE, Nombre y País)...")
@@ -295,14 +294,14 @@ def check_cita_girona(config: Dict[str, Any], headless: bool = True) -> Tuple[bo
 
             handle_captcha_if_present(page, config)
 
-            with page.expect_navigation(wait_until="domcontentloaded", timeout=15000):
-                page.click("#btnEnviar")
+            page.click("#btnEnviar")
+            time.sleep(1)
 
             # Paso 5: Consultar Cita
             if page.is_visible("#btnEnviar"):
                 handle_captcha_if_present(page, config)
-                with page.expect_navigation(wait_until="domcontentloaded", timeout=15000):
-                    page.click("#btnEnviar")
+                page.click("#btnEnviar")
+                time.sleep(2)
 
             page_text = page.content().lower()
 
@@ -410,7 +409,7 @@ def main():
     ntfy_topic = config.get("ntfy_topic", "")
     headless_mode = "--no-headless" not in sys.argv
 
-    logging.info("=== Monitor de Cita Previa Girona (Ultrarrápido 1s) ===")
+    logging.info("=== Monitor de Cita Previa Girona (Timeout 3m / 180s) ===")
     if ntfy_topic:
         logging.info(f"Notificaciones ntfy.sh activas en: https://ntfy.sh/{ntfy_topic}")
 
