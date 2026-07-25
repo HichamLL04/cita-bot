@@ -197,7 +197,7 @@ def load_config(config_path: str = "config.json") -> Dict[str, Any]:
 
 def check_cita_girona(config: Dict[str, Any], headless: bool = True) -> Tuple[bool, bool]:
     """
-    Realiza una comprobación de citas con cabeceras HTTP reales para evitar la regla WAF 'Intrusion Prevention Violation'.
+    Realiza una comprobación de citas con soporte de redirecciones de portal y WAF.
     """
     url_portal = "https://icp.administracionelectronica.gob.es/icpplus/index.html"
     ntfy_topic = config.get("ntfy_topic", "")
@@ -214,7 +214,6 @@ def check_cita_girona(config: Dict[str, Any], headless: bool = True) -> Tuple[bo
             ]
         )
         
-        # Cabeceras HTTP reales de navegador Chrome completo para pasar el Firewall/WAF
         context = browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
             viewport={"width": 1366, "height": 768},
@@ -240,7 +239,16 @@ def check_cita_girona(config: Dict[str, Any], headless: bool = True) -> Tuple[bo
             t0 = time.time()
             logging.info(f"PASO 1: Conectando al portal oficial ({url_portal})...")
             
-            page.goto(url_portal, wait_until="load", timeout=TIMEOUT)
+            page.goto(url_portal, wait_until="networkidle", timeout=TIMEOUT)
+            
+            # Si no hay selects pero hay un botón inicial o formulario en la portada
+            if not page.is_visible("select"):
+                logging.info("   Esperando renderizado de la portada o botón de acceso...")
+                try:
+                    page.wait_for_selector("select, #btnEnviar, #btnEntrar, #btnAceptar, form", timeout=10000)
+                except Exception:
+                    pass
+
             print_page_details(page, "PASO 1")
 
             page_title_lower = page.title().lower()
@@ -258,9 +266,19 @@ def check_cita_girona(config: Dict[str, Any], headless: bool = True) -> Tuple[bo
             ]
 
             if any(bk in page_text_init or bk in page_title_lower for bk in block_keywords):
-                logging.warning("⚠️ PASO 1 FAILED: Detectada página de bloqueo WAF/Firewall ('Intrusion Prevention Violation').")
+                logging.warning("⚠️ PASO 1 FAILED: Detectada página de bloqueo WAF/Firewall.")
                 browser.close()
                 return False, True
+
+            # Si la portada requiere hacer clic en un botón inicial para entrar al formulario
+            if not page.is_visible("select"):
+                for b_sel in ["#btnEnviar", "#btnEntrar", "#btnAceptar", "input[type='submit']", "button"]:
+                    if page.is_visible(b_sel):
+                        logging.info(f"   Pulsando botón de entrada '{b_sel}'...")
+                        page.click(b_sel)
+                        page.wait_for_selector("select", timeout=15000)
+                        print_page_details(page, "PASO 1 (post-click)")
+                        break
 
             # Paso 2: Seleccionar Provincia (Girona)
             t1 = time.time()
@@ -278,23 +296,9 @@ def check_cita_girona(config: Dict[str, Any], headless: bool = True) -> Tuple[bo
                         logging.warning(f"   Intento de selección en '{sel}' falló: {e_sel}")
 
             if not selected_prov:
-                # Si no está visible inmediatamente, buscar si hay botón de entrada en portada
-                for b_sel in ["#btnEnviar", "#btnEntrar", "#btnAceptar"]:
-                    if page.is_visible(b_sel):
-                        logging.info(f"   Pulsando botón de entrada '{b_sel}' en portada...")
-                        page.click(b_sel)
-                        time.sleep(2)
-                        print_page_details(page, "PASO 2 (post-click entrada)")
-                        break
-                
-                # Reintentar selección
-                for sel in ["#form", "#provincia", "select[name='form']", "select"]:
-                    if page.is_visible(sel):
-                        page.select_option(sel, label="Girona")
-                        selected_prov = True
-                        break
-
-            if not selected_prov:
+                # Log de ayuda con los primeros 500 caracteres del HTML
+                html_snippet = page.content()[:500].replace('\n', ' ')
+                logging.warning(f"   [Diagnóstico HTML Snippet]: {html_snippet}")
                 raise Exception("No se encontró el desplegable de provincias en la página.")
 
             logging.info("   Pulsando 'Aceptar' (#btnAceptar o #btnEnviar)...")
@@ -507,7 +511,7 @@ def main():
     ntfy_topic = config.get("ntfy_topic", "")
     headless_mode = "--no-headless" not in sys.argv
 
-    logging.info("=== Monitor de Cita Previa Girona (Evasión WAF) ===")
+    logging.info("=== Monitor de Cita Previa Girona (Network Idle + Auto Click) ===")
     if ntfy_topic:
         logging.info(f"Notificaciones ntfy.sh activas en: https://ntfy.sh/{ntfy_topic}")
 
