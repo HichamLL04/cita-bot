@@ -17,6 +17,10 @@ except ImportError:
 
 import requests
 
+# Asegurar codificación UTF-8 en salida de consola para cualquier OS (Windows/Linux)
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+
 # Configuración de logging detallado
 logging.basicConfig(
     level=logging.INFO,
@@ -30,7 +34,7 @@ logging.basicConfig(
 def send_ntfy_alert(topic: str, title: str, message: str, priority: str = "high") -> None:
     """Envía notificación push instantánea al móvil a través de ntfy.sh."""
     if not topic:
-        logging.warning("⚠️ No se ha especificado 'ntfy_topic' en config.json. Imprimiendo en consola:")
+        logging.warning("[ALERTA] No se ha especificado 'ntfy_topic' en config.json. Imprimiendo en consola:")
         logging.info(f"[{title}] {message}")
         return
 
@@ -47,11 +51,11 @@ def send_ntfy_alert(topic: str, title: str, message: str, priority: str = "high"
             timeout=10
         )
         if res.status_code == 200:
-            logging.info(f"🔔 Notificación enviada con éxito a ntfy.sh/{topic}")
+            logging.info(f"[NTFY] Notificación enviada con éxito a ntfy.sh/{topic}")
         else:
-            logging.warning(f"ntfy.sh devolvió código {res.status_code}: {res.text}")
+            logging.warning(f"[NTFY] ntfy.sh devolvió código {res.status_code}: {res.text}")
     except Exception as e:
-        logging.error(f"Error enviando notificación a ntfy.sh: {e}")
+        logging.error(f"[NTFY] Error enviando notificación a ntfy.sh: {e}")
 
 def get_smart_check_interval(config: Dict[str, Any]) -> Tuple[int, str]:
     """Calcula el intervalo dinámico en segundos según la hora y día actual."""
@@ -75,10 +79,10 @@ def get_smart_check_interval(config: Dict[str, Any]) -> Tuple[int, str]:
 
     if is_peak:
         interval = config.get("peak_interval_seconds", 90)
-        return interval, "🔥 HORA PUNTA (Búsqueda Rápida cada 90s)"
+        return interval, "HORA PUNTA (Búsqueda Rápida cada 90s)"
     else:
         interval = config.get("off_peak_interval_seconds", 900)
-        return interval, "💤 Hora Normal (Búsqueda cada 15m)"
+        return interval, "Hora Normal (Búsqueda cada 15m)"
 
 def solve_recaptcha_anticaptcha(api_key: str, page_url: str, site_key: str) -> Optional[str]:
     """Resuelve reCAPTCHA v2 usando la API de Anti-Captcha.com."""
@@ -123,9 +127,9 @@ def handle_captcha_if_present(page, config: Dict[str, Any]) -> None:
     if not g_recaptcha:
         return
 
-    logging.info("🔒 reCAPTCHA detectado en la página.")
+    logging.info("[CAPTCHA] reCAPTCHA detectado en la página.")
     if not api_key:
-        logging.warning("⚠️ No se ha configurado 'anticaptcha_api_key' en config.json. Omitiendo...")
+        logging.warning("[CAPTCHA] No se ha configurado 'anticaptcha_api_key' en config.json. Omitiendo...")
         return
 
     site_key = page.evaluate("""() => {
@@ -140,7 +144,7 @@ def handle_captcha_if_present(page, config: Dict[str, Any]) -> None:
     }""")
 
     if not site_key:
-        logging.warning("No se pudo extraer la clave sitekey del reCAPTCHA.")
+        logging.warning("[CAPTCHA] No se pudo extraer la clave sitekey del reCAPTCHA.")
         return
 
     token = solve_recaptcha_anticaptcha(api_key, page.url, site_key)
@@ -175,7 +179,7 @@ def print_page_details(page, step_label: str) -> None:
             return { selects, buttons, inputs };
         }""")
         
-        logging.info(f"📄 [{step_label}] PÁGINA ACTUAL: '{title}' | URL: {url}")
+        logging.info(f"[PAGE] [{step_label}] PÁGINA ACTUAL: '{title}' | URL: {url}")
         logging.info(f"   └─ Selects ({len(details['selects'])}): {details['selects']}")
         logging.info(f"   └─ Botones ({len(details['buttons'])}): {details['buttons']}")
         logging.info(f"   └─ Campos Inputs ({len(details['inputs'])}): {details['inputs']}")
@@ -197,15 +201,23 @@ def load_config(config_path: str = "config.json") -> Dict[str, Any]:
 
 def check_cita_girona(config: Dict[str, Any], headless: bool = True) -> Tuple[bool, bool]:
     """
-    Realiza una comprobación de citas con soporte de redirecciones de portal y WAF.
+    Realiza una comprobación de citas con entrada oficial por index.html (sin saltos directos a citar).
     """
-    url_portal = "https://icp.administracionelectronica.gob.es/icpplus/index.html"
+    url_index = "https://icp.administracionelectronica.gob.es/icpplus/index.html"
     ntfy_topic = config.get("ntfy_topic", "")
     TIMEOUT = 60000
 
+    profile_dir = os.path.join(os.path.expanduser("~"), ".girona_chrome_profile")
+    os.makedirs(profile_dir, exist_ok=True)
+
     with sync_playwright() as p:
-        browser = p.chromium.launch(
+        context = p.chromium.launch_persistent_context(
+            user_data_dir=profile_dir,
             headless=headless,
+            viewport={"width": 1366, "height": 768},
+            locale="es-ES",
+            timezone_id="Europe/Madrid",
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
             args=[
                 "--no-sandbox",
                 "--disable-setuid-sandbox",
@@ -213,41 +225,23 @@ def check_cita_girona(config: Dict[str, Any], headless: bool = True) -> Tuple[bo
                 "--disable-blink-features=AutomationControlled"
             ]
         )
-        
-        context = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-            viewport={"width": 1366, "height": 768},
-            extra_http_headers={
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-                "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
-                "Sec-Ch-Ua": '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
-                "Sec-Ch-Ua-Mobile": "?0",
-                "Sec-Ch-Ua-Platform": '"Windows"',
-                "Sec-Fetch-Dest": "document",
-                "Sec-Fetch-Mode": "navigate",
-                "Sec-Fetch-Site": "none",
-                "Sec-Fetch-User": "?1",
-                "Upgrade-Insecure-Requests": "1"
-            }
-        )
 
-        page = context.new_page()
-        page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+        page = context.pages[0] if context.pages else context.new_page()
+        page.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+            Object.defineProperty(navigator, 'languages', { get: () => ['es-ES', 'es', 'en-US', 'en'] });
+            Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+            window.chrome = { runtime: {} };
+        """)
+        
         page.set_default_timeout(TIMEOUT)
 
         try:
             t0 = time.time()
-            logging.info(f"PASO 1: Conectando al portal oficial ({url_portal})...")
+            logging.info(f"PASO 1: Conectando a la portada oficial ({url_index})...")
             
-            page.goto(url_portal, wait_until="networkidle", timeout=TIMEOUT)
-            
-            # Si no hay selects pero hay un botón inicial o formulario en la portada
-            if not page.is_visible("select"):
-                logging.info("   Esperando renderizado de la portada o botón de acceso...")
-                try:
-                    page.wait_for_selector("select, #btnEnviar, #btnEntrar, #btnAceptar, form", timeout=10000)
-                except Exception:
-                    pass
+            # Cargar siempre portada oficial
+            page.goto(url_index, wait_until="networkidle", timeout=TIMEOUT)
 
             print_page_details(page, "PASO 1")
 
@@ -266,29 +260,19 @@ def check_cita_girona(config: Dict[str, Any], headless: bool = True) -> Tuple[bo
             ]
 
             if any(bk in page_text_init or bk in page_title_lower for bk in block_keywords):
-                logging.warning("⚠️ PASO 1 FAILED: Detectada página de bloqueo WAF/Firewall.")
-                browser.close()
+                logging.warning("[BLOQUEO] PASO 1 FAILED: Detectada página de bloqueo WAF/Firewall.")
+                context.close()
                 return False, True
-
-            # Si la portada requiere hacer clic en un botón inicial para entrar al formulario
-            if not page.is_visible("select"):
-                for b_sel in ["#btnEnviar", "#btnEntrar", "#btnAceptar", "input[type='submit']", "button"]:
-                    if page.is_visible(b_sel):
-                        logging.info(f"   Pulsando botón de entrada '{b_sel}'...")
-                        page.click(b_sel)
-                        page.wait_for_selector("select", timeout=15000)
-                        print_page_details(page, "PASO 1 (post-click)")
-                        break
 
             # Paso 2: Seleccionar Provincia (Girona)
             t1 = time.time()
-            logging.info("PASO 2: Buscando selector de provincia 'Girona'...")
+            logging.info("PASO 2: Seleccionando provincia 'Girona'...")
             
             selected_prov = False
             for sel in ["#form", "#provincia", "select[name='form']", "select"]:
-                if page.is_visible(sel):
+                if page.query_selector(sel):
                     try:
-                        page.select_option(sel, label="Girona")
+                        page.select_option(sel, label="Girona", force=True)
                         selected_prov = True
                         logging.info(f"   [OK] Provincia 'Girona' seleccionada en selector '{sel}'.")
                         break
@@ -296,14 +280,29 @@ def check_cita_girona(config: Dict[str, Any], headless: bool = True) -> Tuple[bo
                         logging.warning(f"   Intento de selección en '{sel}' falló: {e_sel}")
 
             if not selected_prov:
-                # Log de ayuda con los primeros 500 caracteres del HTML
+                for b_sel in ["#btnEnviar", "#btnEntrar", "#btnAceptar", "input[type='submit']", "button"]:
+                    if page.query_selector(b_sel):
+                        logging.info(f"   Pulsando botón de entrada '{b_sel}' en portada...")
+                        page.click(b_sel, force=True)
+                        time.sleep(2)
+                        print_page_details(page, "PASO 2 (post-click entrada)")
+                        break
+                
+                for sel in ["#form", "#provincia", "select[name='form']", "select"]:
+                    if page.query_selector(sel):
+                        page.select_option(sel, label="Girona", force=True)
+                        selected_prov = True
+                        logging.info(f"   [OK] Provincia 'Girona' seleccionada en selector '{sel}'.")
+                        break
+
+            if not selected_prov:
                 html_snippet = page.content()[:500].replace('\n', ' ')
                 logging.warning(f"   [Diagnóstico HTML Snippet]: {html_snippet}")
                 raise Exception("No se encontró el desplegable de provincias en la página.")
 
             logging.info("   Pulsando 'Aceptar' (#btnAceptar o #btnEnviar)...")
-            btn_step2 = "#btnAceptar" if page.is_visible("#btnAceptar") else "#btnEnviar"
-            page.click(btn_step2)
+            btn_step2 = "#btnAceptar" if page.query_selector("#btnAceptar") else "#btnEnviar"
+            page.click(btn_step2, force=True)
             
             time.sleep(2)
             print_page_details(page, "PASO 2 (después de elegir Girona)")
@@ -314,40 +313,40 @@ def check_cita_girona(config: Dict[str, Any], headless: bool = True) -> Tuple[bo
 
             if use_any_office:
                 logging.info("PASO 3: Seleccionando 'Cualquier oficina' (opción 99)...")
-                if page.is_visible("#sede"):
-                    page.select_option("#sede", value="99")
+                if page.query_selector("#sede"):
+                    page.select_option("#sede", value="99", force=True)
             else:
                 offices = config.get("offices", [{"id": "4", "name": "CNP LLORET DE MAR"}])
-                if offices and page.is_visible("#sede"):
+                if offices and page.query_selector("#sede"):
                     logging.info(f"PASO 3: Seleccionando oficina ID {offices[0].get('id')}...")
-                    page.select_option("#sede", value=offices[0].get("id", "4"))
+                    page.select_option("#sede", value=offices[0].get("id", "4"), force=True)
 
             tramite_selected = False
             for select_name in ["tramiteGrupo[1]", "tramiteGrupo[0]", "tramiteCuerpo[0]", "tramite[0]"]:
-                if page.is_visible(f"select[name='{select_name}']"):
+                if page.query_selector(f"select[name='{select_name}']"):
                     try:
-                        page.select_option(f"select[name='{select_name}']", value=tramite_id)
+                        page.select_option(f"select[name='{select_name}']", value=tramite_id, force=True)
                         tramite_selected = True
                         logging.info(f"   [OK] Trámite {tramite_id} seleccionado en {select_name}.")
                         break
                     except Exception as e_tr:
                         logging.warning(f"   Intento selección trámite en {select_name} falló: {e_tr}")
             
-            if not tramite_selected and page.is_visible("#tramite"):
-                page.select_option("#tramite", value=tramite_id)
+            if not tramite_selected and page.query_selector("#tramite"):
+                page.select_option("#tramite", value=tramite_id, force=True)
                 logging.info(f"   [OK] Trámite {tramite_id} seleccionado en #tramite.")
 
             logging.info("   Pulsando 'Aceptar' (#btnAceptar)...")
             t2 = time.time()
-            btn_step3 = "#btnAceptar" if page.is_visible("#btnAceptar") else "#btnEnviar"
-            page.click(btn_step3)
+            btn_step3 = "#btnAceptar" if page.query_selector("#btnAceptar") else "#btnEnviar"
+            page.click(btn_step3, force=True)
             time.sleep(2)
             print_page_details(page, "PASO 3 (post-trámite)")
 
             # Paso 4: Pantalla de Información / Instrucciones (#btnEntrar)
-            if page.is_visible("#btnEntrar"):
+            if page.query_selector("#btnEntrar"):
                 logging.info("PASO 4: Pantalla de instrucciones detectada. Pulsando 'Entrar' (#btnEntrar)...")
-                page.click("#btnEntrar")
+                page.click("#btnEntrar", force=True)
                 time.sleep(2)
                 print_page_details(page, "PASO 4 (post-entrar)")
 
@@ -355,24 +354,24 @@ def check_cita_girona(config: Dict[str, Any], headless: bool = True) -> Tuple[bo
             logging.info("PASO 5: Rellenando NIE, Nombre y País...")
             
             doc_type = config.get("doc_type", "NIE").upper()
-            if doc_type == "NIE" and page.is_visible("#rbtNie"):
-                page.check("#rbtNie")
-            elif doc_type == "PASAPORTE" and page.is_visible("#rbtPasaporte"):
-                page.check("#rbtPasaporte")
-            elif page.is_visible("#rbtNif"):
-                page.check("#rbtNif")
+            if doc_type == "NIE" and page.query_selector("#rbtNie"):
+                page.check("#rbtNie", force=True)
+            elif doc_type == "PASAPORTE" and page.query_selector("#rbtPasaporte"):
+                page.check("#rbtPasaporte", force=True)
+            elif page.query_selector("#rbtNif"):
+                page.check("#rbtNif", force=True)
 
             page.fill("#txtIdCitador", config.get("doc_value", ""))
             page.fill("#txtDesCitador", config.get("name", ""))
 
             country = config.get("country", "MARRUECOS")
-            if page.is_visible("#txtPaisNac"):
+            if page.query_selector("#txtPaisNac"):
                 try:
-                    page.select_option("#txtPaisNac", label=country.upper())
+                    page.select_option("#txtPaisNac", label=country.upper(), force=True)
                     logging.info(f"   [OK] País seleccionado: {country.upper()}")
                 except Exception:
                     try:
-                        page.select_option("#txtPaisNac", value="348")
+                        page.select_option("#txtPaisNac", value="348", force=True)
                         logging.info("   [OK] País seleccionado por código 348.")
                     except Exception as e_c:
                         logging.warning(f"   No se pudo seleccionar país '{country}': {e_c}")
@@ -381,15 +380,15 @@ def check_cita_girona(config: Dict[str, Any], headless: bool = True) -> Tuple[bo
 
             logging.info("   Pulsando 'Enviar' (#btnEnviar)...")
             t3 = time.time()
-            page.click("#btnEnviar")
+            page.click("#btnEnviar", force=True)
             time.sleep(2)
             print_page_details(page, "PASO 5 (post-formulario)")
 
             # Paso 6: Consultar Cita
-            if page.is_visible("#btnEnviar"):
+            if page.query_selector("#btnEnviar"):
                 handle_captcha_if_present(page, config)
                 logging.info("PASO 6: Pulsando 'Solicitar Cita' (#btnEnviar)...")
-                page.click("#btnEnviar")
+                page.click("#btnEnviar", force=True)
                 time.sleep(2)
                 print_page_details(page, "PASO 6 (resultado final)")
 
@@ -397,8 +396,8 @@ def check_cita_girona(config: Dict[str, Any], headless: bool = True) -> Tuple[bo
             page_text = page.content().lower()
 
             if any(bk in page_text for bk in block_keywords):
-                logging.warning("⚠️ Detectada respuesta de bloqueo o sobrecarga.")
-                browser.close()
+                logging.warning("[BLOQUEO] Detectada respuesta de bloqueo o sobrecarga.")
+                context.close()
                 return False, True
 
             no_available_keywords = [
@@ -413,7 +412,7 @@ def check_cita_girona(config: Dict[str, Any], headless: bool = True) -> Tuple[bo
             preferred_offices = config.get("offices", [])
             preferred_ids = [str(o.get("id")) for o in preferred_offices if "id" in o]
 
-            if page.is_visible("#idSede"):
+            if page.query_selector("#idSede"):
                 options = page.eval_on_selector_all("#idSede option", """
                     opts => opts.map(o => ({ value: o.value, text: o.innerText.trim() }))
                 """)
@@ -434,7 +433,7 @@ def check_cita_girona(config: Dict[str, Any], headless: bool = True) -> Tuple[bo
                     if matching_offices:
                         offices_str = "\n".join([f"• {o['text']}" for o in matching_offices])
                         msg = (
-                            f"🚨 ¡¡¡ CITA DISPONIBLE EN TU OFICINA PREFERIDA !!! 🚨\n\n"
+                            f"[ALERTA] ¡¡¡ CITA DISPONIBLE EN TU OFICINA PREFERIDA !!!\n\n"
                             f"Oficinas deseadas con hueco libre:\n{offices_str}\n\n"
                             f"Trámite: Toma de Huellas ({tramite_id})\n"
                             f"¡Entra de inmediato a la Sede Electrónica!"
@@ -442,23 +441,23 @@ def check_cita_girona(config: Dict[str, Any], headless: bool = True) -> Tuple[bo
                         logging.info(msg)
                         send_ntfy_alert(
                             topic=ntfy_topic,
-                            title="🚨 Cita Disponible en Tu Oficina!",
+                            title="[ALERTA] Cita Disponible en Tu Oficina!",
                             message=msg,
                             priority="urgent"
                         )
                         page.screenshot(path="cita_disponible_girona.png")
-                        browser.close()
+                        context.close()
                         return True, False
                     
                     elif not only_preferred:
                         offices_str = "\n".join([f"• {o['text']}" for o in available_offices])
                         msg = (
-                            f"ℹ️ Cita disponible en otras oficinas de Girona:\n{offices_str}"
+                            f"[INFO] Cita disponible en otras oficinas de Girona:\n{offices_str}"
                         )
                         logging.info(msg)
                         send_ntfy_alert(
                             topic=ntfy_topic,
-                            title="ℹ️ Cita Disponible (Otra Oficina)",
+                            title="[INFO] Cita Disponible (Otra Oficina)",
                             message=msg,
                             priority="default"
                         )
@@ -467,19 +466,19 @@ def check_cita_girona(config: Dict[str, Any], headless: bool = True) -> Tuple[bo
 
             elif not has_no_appointments:
                 msg = (
-                    f"🚨 ¡¡¡ CITA PREVIA DISPONIBLE EN GIRONA !!! 🚨\n\n"
+                    f"[ALERTA] ¡¡¡ CITA PREVIA DISPONIBLE EN GIRONA !!!\n\n"
                     f"Trámite: Toma de Huellas ({tramite_id})\n"
                     f"¡Entra inmediatamente a la Sede Electrónica!"
                 )
                 logging.info(msg)
                 send_ntfy_alert(
                     topic=ntfy_topic,
-                    title="🚨 Cita Previa Disponible en Girona!",
+                    title="[ALERTA] Cita Previa Disponible en Girona!",
                     message=msg,
                     priority="urgent"
                 )
                 page.screenshot(path="cita_disponible_girona.png")
-                browser.close()
+                context.close()
                 return True, False
             else:
                 logging.info("   RESULTADO: Sin citas disponibles en ninguna oficina de la provincia en este momento.")
@@ -501,7 +500,7 @@ def check_cita_girona(config: Dict[str, Any], headless: bool = True) -> Tuple[bo
             except Exception:
                 pass
         finally:
-            browser.close()
+            context.close()
 
     return False, False
 
@@ -511,7 +510,7 @@ def main():
     ntfy_topic = config.get("ntfy_topic", "")
     headless_mode = "--no-headless" not in sys.argv
 
-    logging.info("=== Monitor de Cita Previa Girona (Network Idle + Auto Click) ===")
+    logging.info("=== Monitor de Cita Previa Girona (Entrada Oficial Infalible) ===")
     if ntfy_topic:
         logging.info(f"Notificaciones ntfy.sh activas en: https://ntfy.sh/{ntfy_topic}")
 
@@ -533,11 +532,11 @@ def main():
             if consecutive_errors >= 2 or is_blocked:
                 resume_time = datetime.now() + timedelta(hours=pause_hours)
                 resume_str = resume_time.strftime("%H:%M:%S")
-                msg_pause = f"⚠️ Sede Electrónica restringida (Firewall). Pausa de {pause_hours} hora(s). Reanudación a las {resume_str}."
+                msg_pause = f"[BLOQUEO] Sede Electrónica restringida (Firewall). Pausa de {pause_hours} hora(s). Reanudación a las {resume_str}."
                 logging.warning(msg_pause)
                 send_ntfy_alert(
                     topic=ntfy_topic,
-                    title="⚠️ Servidor en Pausa (Firewall)",
+                    title="[BLOQUEO] Servidor en Pausa (Firewall)",
                     message=msg_pause,
                     priority="default"
                 )
