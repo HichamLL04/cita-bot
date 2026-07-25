@@ -201,9 +201,15 @@ def load_config(config_path: str = "config.json") -> Dict[str, Any]:
 
 def check_cita_girona(config: Dict[str, Any], headless: bool = True) -> Tuple[bool, bool]:
     """
-    Realiza una comprobación de citas con entrada oficial por index.html (sin saltos directos a citar).
+    Realiza la navegación rápida (Fast-Forward) exacta que utiliza bcncita para saltar directamente a la toma de datos.
     """
-    url_index = "https://icp.administracionelectronica.gob.es/icpplus/index.html"
+    province_id = "17"  # Girona
+    operation_category = "icpplus"
+    tramite_param = "tramiteGrupo[1]"
+    tramite_id = config.get("tramite_id", "4010")
+
+    fast_forward_url = f"https://icp.administracionelectronica.gob.es/{operation_category}/citar?p={province_id}"
+    fast_forward_url2 = f"https://icp.administracionelectronica.gob.es/{operation_category}/acInfo?{tramite_param}={tramite_id}"
     ntfy_topic = config.get("ntfy_topic", "")
     TIMEOUT = 60000
 
@@ -237,13 +243,15 @@ def check_cita_girona(config: Dict[str, Any], headless: bool = True) -> Tuple[bo
         page.set_default_timeout(TIMEOUT)
 
         try:
-            t0 = time.time()
-            logging.info(f"PASO 1: Conectando a la portada oficial ({url_index})...")
-            
-            # Cargar siempre portada oficial
-            page.goto(url_index, wait_until="networkidle", timeout=TIMEOUT)
+            logging.info(f"PASO 1 (Fast-Forward Barcelona): Estableciendo provincia Girona (p={province_id})...")
+            page.goto(fast_forward_url, wait_until="domcontentloaded", timeout=TIMEOUT)
+            time.sleep(2)
 
-            print_page_details(page, "PASO 1")
+            logging.info(f"PASO 2 (Fast-Forward Barcelona): Cargando directamente trámite {tramite_id} (acInfo)...")
+            page.goto(fast_forward_url2, wait_until="domcontentloaded", timeout=TIMEOUT)
+            time.sleep(2)
+
+            print_page_details(page, "FAST-FORWARD")
 
             page_title_lower = page.title().lower()
             page_text_init = page.content().lower()
@@ -260,109 +268,50 @@ def check_cita_girona(config: Dict[str, Any], headless: bool = True) -> Tuple[bo
             ]
 
             if any(bk in page_text_init or bk in page_title_lower for bk in block_keywords):
-                logging.warning("[BLOQUEO] PASO 1 FAILED: Detectada página de bloqueo WAF/Firewall.")
+                logging.warning("[BLOQUEO] Fast-forward FAILED: Detectada página de bloqueo WAF/Firewall.")
                 context.close()
                 return False, True
 
-            # Paso 2: Seleccionar Provincia (Girona)
-            t1 = time.time()
-            logging.info("PASO 2: Seleccionando provincia 'Girona'...")
-            
-            selected_prov = False
-            for sel in ["#form", "#provincia", "select[name='form']", "select"]:
-                if page.query_selector(sel):
-                    try:
-                        page.select_option(sel, label="Girona", force=True)
-                        selected_prov = True
-                        logging.info(f"   [OK] Provincia 'Girona' seleccionada en selector '{sel}'.")
-                        break
-                    except Exception as e_sel:
-                        logging.warning(f"   Intento de selección en '{sel}' falló: {e_sel}")
-
-            if not selected_prov:
-                for b_sel in ["#btnEnviar", "#btnEntrar", "#btnAceptar", "input[type='submit']", "button"]:
-                    if page.query_selector(b_sel):
-                        logging.info(f"   Pulsando botón de entrada '{b_sel}' en portada...")
-                        page.click(b_sel, force=True)
-                        time.sleep(2)
-                        print_page_details(page, "PASO 2 (post-click entrada)")
-                        break
-                
-                for sel in ["#form", "#provincia", "select[name='form']", "select"]:
-                    if page.query_selector(sel):
-                        page.select_option(sel, label="Girona", force=True)
-                        selected_prov = True
-                        logging.info(f"   [OK] Provincia 'Girona' seleccionada en selector '{sel}'.")
-                        break
-
-            if not selected_prov:
-                html_snippet = page.content()[:500].replace('\n', ' ')
-                logging.warning(f"   [Diagnóstico HTML Snippet]: {html_snippet}")
-                raise Exception("No se encontró el desplegable de provincias en la página.")
-
-            logging.info("   Pulsando 'Aceptar' (#btnAceptar o #btnEnviar)...")
-            btn_step2 = "#btnAceptar" if page.query_selector("#btnAceptar") else "#btnEnviar"
-            page.click(btn_step2, force=True)
-            
-            time.sleep(2)
-            print_page_details(page, "PASO 2 (después de elegir Girona)")
-
-            # Paso 3: Seleccionar Oficina y Trámite
-            use_any_office = config.get("use_any_office", True)
-            tramite_id = config.get("tramite_id", "4010")
-
-            if use_any_office:
-                logging.info("PASO 3: Seleccionando 'Cualquier oficina' (opción 99)...")
-                if page.query_selector("#sede"):
-                    page.select_option("#sede", value="99", force=True)
-            else:
-                offices = config.get("offices", [{"id": "4", "name": "CNP LLORET DE MAR"}])
-                if offices and page.query_selector("#sede"):
-                    logging.info(f"PASO 3: Seleccionando oficina ID {offices[0].get('id')}...")
-                    page.select_option("#sede", value=offices[0].get("id", "4"), force=True)
-
-            tramite_selected = False
-            for select_name in ["tramiteGrupo[1]", "tramiteGrupo[0]", "tramiteCuerpo[0]", "tramite[0]"]:
-                if page.query_selector(f"select[name='{select_name}']"):
-                    try:
-                        page.select_option(f"select[name='{select_name}']", value=tramite_id, force=True)
-                        tramite_selected = True
-                        logging.info(f"   [OK] Trámite {tramite_id} seleccionado en {select_name}.")
-                        break
-                    except Exception as e_tr:
-                        logging.warning(f"   Intento selección trámite en {select_name} falló: {e_tr}")
-            
-            if not tramite_selected and page.query_selector("#tramite"):
-                page.select_option("#tramite", value=tramite_id, force=True)
-                logging.info(f"   [OK] Trámite {tramite_id} seleccionado en #tramite.")
-
-            logging.info("   Pulsando 'Aceptar' (#btnAceptar)...")
-            t2 = time.time()
-            btn_step3 = "#btnAceptar" if page.query_selector("#btnAceptar") else "#btnEnviar"
-            page.click(btn_step3, force=True)
-            time.sleep(2)
-            print_page_details(page, "PASO 3 (post-trámite)")
-
-            # Paso 4: Pantalla de Información / Instrucciones (#btnEntrar)
+            # Paso 3: Pantalla de Instrucciones (#btnEntrar)
             if page.query_selector("#btnEntrar"):
-                logging.info("PASO 4: Pantalla de instrucciones detectada. Pulsando 'Entrar' (#btnEntrar)...")
+                logging.info("PASO 3: Pantalla de instrucciones detectada (#btnEntrar). Pulsando Entrar...")
                 page.click("#btnEntrar", force=True)
                 time.sleep(2)
-                print_page_details(page, "PASO 4 (post-entrar)")
+                print_page_details(page, "PASO 3 (post-entrar)")
+            elif not page.query_selector("#txtIdCitado") and not page.query_selector("#txtIdCitador"):
+                logging.warning("   [Advertencia] No se detectó #btnEntrar ni formulario de datos personles. Intentando pulsar botón de entrada...")
+                for b_sel in ["#btnEnviar", "#btnEntrar", "#btnAceptar", "input[type='submit']"]:
+                    if page.query_selector(b_sel):
+                        page.click(b_sel, force=True)
+                        time.sleep(2)
+                        break
 
-            # Paso 5: Rellenar Formulario de Datos Personales
-            logging.info("PASO 5: Rellenando NIE, Nombre y País...")
+            # Paso 4: Rellenar Formulario de Datos Personales
+            logging.info("PASO 4: Rellenando NIE/Pasaporte, Nombre y País...")
             
             doc_type = config.get("doc_type", "NIE").upper()
-            if doc_type == "NIE" and page.query_selector("#rbtNie"):
-                page.check("#rbtNie", force=True)
-            elif doc_type == "PASAPORTE" and page.query_selector("#rbtPasaporte"):
-                page.check("#rbtPasaporte", force=True)
-            elif page.query_selector("#rbtNif"):
-                page.check("#rbtNif", force=True)
+            if doc_type == "NIE":
+                for sel in ["#rbtNie", "#rdbTipoDocNie"]:
+                    if page.query_selector(sel):
+                        page.check(sel, force=True)
+                        break
+            elif doc_type == "PASAPORTE":
+                for sel in ["#rbtPasaporte", "#rdbTipoDocPas"]:
+                    if page.query_selector(sel):
+                        page.check(sel, force=True)
+                        break
 
-            page.fill("#txtIdCitador", config.get("doc_value", ""))
-            page.fill("#txtDesCitador", config.get("name", ""))
+            # Rellenar campo NIE/Pasaporte
+            for sel in ["#txtIdCitado", "#txtIdCitador"]:
+                if page.query_selector(sel):
+                    page.fill(sel, config.get("doc_value", ""))
+                    break
+
+            # Rellenar Nombre
+            for sel in ["#txtDesCitado", "#txtDesCitador"]:
+                if page.query_selector(sel):
+                    page.fill(sel, config.get("name", ""))
+                    break
 
             country = config.get("country", "MARRUECOS")
             if page.query_selector("#txtPaisNac"):
@@ -382,15 +331,15 @@ def check_cita_girona(config: Dict[str, Any], headless: bool = True) -> Tuple[bo
             t3 = time.time()
             page.click("#btnEnviar", force=True)
             time.sleep(2)
-            print_page_details(page, "PASO 5 (post-formulario)")
+            print_page_details(page, "PASO 4 (post-formulario)")
 
-            # Paso 6: Consultar Cita
+            # Paso 5: Consultar Cita
             if page.query_selector("#btnEnviar"):
                 handle_captcha_if_present(page, config)
-                logging.info("PASO 6: Pulsando 'Solicitar Cita' (#btnEnviar)...")
+                logging.info("PASO 5: Pulsando 'Solicitar Cita' (#btnEnviar)...")
                 page.click("#btnEnviar", force=True)
                 time.sleep(2)
-                print_page_details(page, "PASO 6 (resultado final)")
+                print_page_details(page, "PASO 5 (resultado final)")
 
             logging.info(f"   [OK] Consulta completada en {time.time() - t3:.2f}s. Analizando respuesta...")
             page_text = page.content().lower()
@@ -510,7 +459,7 @@ def main():
     ntfy_topic = config.get("ntfy_topic", "")
     headless_mode = "--no-headless" not in sys.argv
 
-    logging.info("=== Monitor de Cita Previa Girona (Entrada Oficial Infalible) ===")
+    logging.info("=== Monitor de Cita Previa Girona (Barcelona Fast-Forward URL Flow) ===")
     if ntfy_topic:
         logging.info(f"Notificaciones ntfy.sh activas en: https://ntfy.sh/{ntfy_topic}")
 
