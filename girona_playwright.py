@@ -158,7 +158,7 @@ def handle_captcha_if_present(page, config: Dict[str, Any]) -> None:
         time.sleep(1)
 
 def print_page_details(page, step_label: str) -> None:
-    """Imprime en el log la información detallada de la página actual (URL, Título, Formas, Botones, Selects)."""
+    """Imprime en el log la información detallada de la página actual."""
     try:
         url = page.url
         title = page.title()
@@ -197,10 +197,9 @@ def load_config(config_path: str = "config.json") -> Dict[str, Any]:
 
 def check_cita_girona(config: Dict[str, Any], headless: bool = True) -> Tuple[bool, bool]:
     """
-    Realiza una comprobación de citas imprimiendo los elementos de cada página que visita.
+    Realiza una comprobación de citas con cabeceras HTTP reales para evitar la regla WAF 'Intrusion Prevention Violation'.
     """
-    url_base = "https://icp.administracionelectronica.gob.es/icpplus/citar?locale=es"
-    url_index = "https://icp.administracionelectronica.gob.es/icpplus/index.html"
+    url_portal = "https://icp.administracionelectronica.gob.es/icpplus/index.html"
     ntfy_topic = config.get("ntfy_topic", "")
     TIMEOUT = 60000
 
@@ -214,9 +213,23 @@ def check_cita_girona(config: Dict[str, Any], headless: bool = True) -> Tuple[bo
                 "--disable-blink-features=AutomationControlled"
             ]
         )
+        
+        # Cabeceras HTTP reales de navegador Chrome completo para pasar el Firewall/WAF
         context = browser.new_context(
-            user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-            viewport={"width": 1280, "height": 800}
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            viewport={"width": 1366, "height": 768},
+            extra_http_headers={
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+                "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
+                "Sec-Ch-Ua": '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
+                "Sec-Ch-Ua-Mobile": "?0",
+                "Sec-Ch-Ua-Platform": '"Windows"',
+                "Sec-Fetch-Dest": "document",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Site": "none",
+                "Sec-Fetch-User": "?1",
+                "Upgrade-Insecure-Requests": "1"
+            }
         )
 
         page = context.new_page()
@@ -225,46 +238,34 @@ def check_cita_girona(config: Dict[str, Any], headless: bool = True) -> Tuple[bo
 
         try:
             t0 = time.time()
-            logging.info(f"PASO 1: Conectando directamente al portal de selección ({url_base})...")
+            logging.info(f"PASO 1: Conectando al portal oficial ({url_portal})...")
             
-            # Navegar directamente a la URL de selección de provincia
-            page.goto(url_base, wait_until="load", timeout=TIMEOUT)
-            
-            # Si no hay selects en citar, ir a index.html
-            if not page.is_visible("select"):
-                logging.info(f"   URL citar no mostró selects, navegando a {url_index}...")
-                page.goto(url_index, wait_until="load", timeout=TIMEOUT)
-
+            page.goto(url_portal, wait_until="load", timeout=TIMEOUT)
             print_page_details(page, "PASO 1")
 
+            page_title_lower = page.title().lower()
             page_text_init = page.content().lower()
+            
             block_keywords = [
+                "intrusion prevention violation",
                 "acceso restringido",
                 "exceso de peticiones",
                 "demasiadas peticiones",
                 "403 forbidden",
-                "bloqueo temporal"
+                "bloqueo temporal",
+                "fortinet",
+                "access denied"
             ]
-            if any(bk in page_text_init for bk in block_keywords):
-                logging.warning("⚠️ PASO 1 FAILED: Detectado aviso de bloqueo o restricción de la Sede.")
+
+            if any(bk in page_text_init or bk in page_title_lower for bk in block_keywords):
+                logging.warning("⚠️ PASO 1 FAILED: Detectada página de bloqueo WAF/Firewall ('Intrusion Prevention Violation').")
                 browser.close()
                 return False, True
 
-            # Si en la página inicial hay un botón de 'Acceder' / 'Entrar' o 'Consultar'
-            if not page.is_visible("#form") and not page.is_visible("select"):
-                for b_sel in ["#btnEnviar", "#btnEntrar", "#btnAceptar", "input[type='submit']", "button"]:
-                    if page.is_visible(b_sel):
-                        logging.info(f"   Pulsando botón inicial '{b_sel}' para avanzar a la selección de provincia...")
-                        page.click(b_sel)
-                        time.sleep(2)
-                        print_page_details(page, "PASO 1 (post-click)")
-                        break
-
             # Paso 2: Seleccionar Provincia (Girona)
             t1 = time.time()
-            logging.info("PASO 2: Seleccionando provincia 'Girona'...")
+            logging.info("PASO 2: Buscando selector de provincia 'Girona'...")
             
-            # Seleccionar en el desplegable disponible
             selected_prov = False
             for sel in ["#form", "#provincia", "select[name='form']", "select"]:
                 if page.is_visible(sel):
@@ -275,6 +276,23 @@ def check_cita_girona(config: Dict[str, Any], headless: bool = True) -> Tuple[bo
                         break
                     except Exception as e_sel:
                         logging.warning(f"   Intento de selección en '{sel}' falló: {e_sel}")
+
+            if not selected_prov:
+                # Si no está visible inmediatamente, buscar si hay botón de entrada en portada
+                for b_sel in ["#btnEnviar", "#btnEntrar", "#btnAceptar"]:
+                    if page.is_visible(b_sel):
+                        logging.info(f"   Pulsando botón de entrada '{b_sel}' en portada...")
+                        page.click(b_sel)
+                        time.sleep(2)
+                        print_page_details(page, "PASO 2 (post-click entrada)")
+                        break
+                
+                # Reintentar selección
+                for sel in ["#form", "#provincia", "select[name='form']", "select"]:
+                    if page.is_visible(sel):
+                        page.select_option(sel, label="Girona")
+                        selected_prov = True
+                        break
 
             if not selected_prov:
                 raise Exception("No se encontró el desplegable de provincias en la página.")
@@ -489,7 +507,7 @@ def main():
     ntfy_topic = config.get("ntfy_topic", "")
     headless_mode = "--no-headless" not in sys.argv
 
-    logging.info("=== Monitor de Cita Previa Girona (Lector Completo de Páginas) ===")
+    logging.info("=== Monitor de Cita Previa Girona (Evasión WAF) ===")
     if ntfy_topic:
         logging.info(f"Notificaciones ntfy.sh activas en: https://ntfy.sh/{ntfy_topic}")
 
@@ -511,11 +529,11 @@ def main():
             if consecutive_errors >= 2 or is_blocked:
                 resume_time = datetime.now() + timedelta(hours=pause_hours)
                 resume_str = resume_time.strftime("%H:%M:%S")
-                msg_pause = f"⚠️ Sede Electrónica restringida. Pausa de {pause_hours} hora(s). Reanudación a las {resume_str}."
+                msg_pause = f"⚠️ Sede Electrónica restringida (Firewall). Pausa de {pause_hours} hora(s). Reanudación a las {resume_str}."
                 logging.warning(msg_pause)
                 send_ntfy_alert(
                     topic=ntfy_topic,
-                    title="⚠️ Servidor en Pausa",
+                    title="⚠️ Servidor en Pausa (Firewall)",
                     message=msg_pause,
                     priority="default"
                 )
